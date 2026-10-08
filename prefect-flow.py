@@ -22,6 +22,7 @@ import os
 import time
 
 import boto3
+import duckdb
 import requests
 from dotenv import load_dotenv
 from prefect import flow, task, get_run_logger
@@ -43,6 +44,25 @@ COUNTERS = {
     "not_visible": "ApproximateNumberOfMessagesNotVisible",
     "delayed": "ApproximateNumberOfMessagesDelayed",
 }
+
+
+# function to start each run with an empty fragments table
+@task
+def reset_fragments() -> None:
+    """Create raw.fragments if it is missing and empty it for the new run."""
+    logger = get_run_logger()
+    # every POST starts a fresh puzzle so rows from an older run could hide a missing fragment
+    con = duckdb.connect(DUCKDB_PATH)
+    try:
+        # order_no stays a string here since dbt casts it later
+        con.execute("CREATE SCHEMA IF NOT EXISTS raw")
+        con.execute("CREATE TABLE IF NOT EXISTS raw.fragments (order_no VARCHAR, word VARCHAR, received_at TIMESTAMP)")
+        # empty the table
+        con.execute("DELETE FROM raw.fragments")
+    finally:
+        # always close so dbt can open the file later
+        con.close()
+    logger.info("raw.fragments is ready and empty in %s", DUCKDB_PATH)
 
 
 # function to fill the queue with the messages
@@ -97,11 +117,68 @@ def monitor_queue(queue_url: str, poll_s: int = 5, timeout_s: int = 1200) -> dic
         time.sleep(poll_s)
 
 
+# function to receive every message, store it, then delete it
 @task
-def collect_messages(queue_url: str, expected: int = 21) -> int:
+def collect_messages(queue_url: str, expected: int = 21, wait_s: int = 5, timeout_s: int = 120) -> int:
     """Receive, land in DuckDB, then delete. Return how many fragments are stored."""
-    # TODO (Checkpoint B): MessageAttributeNames=["All"] and resp.get("Messages", [])
-    raise NotImplementedError
+    logger = get_run_logger()
+    # the time to give up at
+    deadline = time.monotonic() + timeout_s
+    con = duckdb.connect(DUCKDB_PATH)
+    try:
+        # keep receiving
+        while True:
+            # ask for up to 10 messages with their attributes
+            # wait_s lets the call wait a few seconds if nothing is visible yet
+            resp = sqs.receive_message(
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=wait_s,
+                MessageAttributeNames=["All"],
+            )
+            # an empty response has no Messages key so default to an empty list
+            messages = resp.get("Messages", [])
+            for msg in messages:
+                # the data is in the attributes and not the body
+                attrs = msg.get("MessageAttributes", {})
+                order_no = attrs.get("order_no", {}).get("StringValue")
+                word = attrs.get("word", {}).get("StringValue")
+                if order_no is None or word is None:
+                    # a message missing either attribute is not a fragment so log it and skip the insert
+                    logger.warning(
+                        "Malformed message %s with attributes %s, deleting without storing",
+                        msg["MessageId"], sorted(attrs),
+                    )
+                else:
+                    # store the fragment first
+                    con.execute("INSERT INTO raw.fragments VALUES (?, ?, now())", [order_no, word])
+                # only then delete the message using its receipt handle
+                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
+            # count distinct order numbers so a fragment stored twice counts once
+            stored = con.execute("SELECT COUNT(DISTINCT order_no) FROM raw.fragments").fetchone()[0]
+            # grab what is left in the queue
+            counts = get_counts(queue_url)
+            remaining = sum(counts.values())
+            logger.info(
+                "Received %d message(s): %d/%d fragments stored, %d left in the queue",
+                len(messages), stored, expected, remaining,
+            )
+            # done when every fragment is stored and the queue is empty
+            if stored >= expected and remaining == 0:
+                logger.info(
+                    "Queue counts after collecting: visible=%d not_visible=%d delayed=%d",
+                    counts["visible"], counts["not_visible"], counts["delayed"],
+                )
+                return stored
+            # past the deadline so fail clearly instead of looping forever
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Only {stored}/{expected} fragments stored and {remaining} message(s) "
+                    f"left in the queue after {timeout_s}s; giving up"
+                )
+    finally:
+        # always close so dbt can open the file later
+        con.close()
 
 
 @task
@@ -127,11 +204,15 @@ def submit_solution(phrase: str, platform: str = "prefect") -> int:
 
 @flow(name="dp2-pipeline", log_prints=True)
 def dp2_pipeline():
+    # start from an empty fragments table since the POST below starts a new puzzle
+    reset_fragments()
     # fill the queue and keep its url
     queue_url = populate_queue()
     # then wait until nothing is delayed
     monitor_queue(queue_url)
-    # TODO (Lesson 10): collect_messages -> dbt_build -> read_phrase -> submit_solution
+    # receive, store and delete every message
+    collect_messages(queue_url)
+    # TODO (Lesson 10): dbt_build -> read_phrase -> submit_solution
 
 
 if __name__ == "__main__":
