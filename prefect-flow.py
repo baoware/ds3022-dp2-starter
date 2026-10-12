@@ -19,6 +19,9 @@ Use Prefect's logger (get_run_logger) for logging. Never hard-code your
 computing ID or the endpoint: read them from the environment (.env).
 """
 import os
+import shutil
+import subprocess
+import sys
 import time
 
 import boto3
@@ -181,18 +184,49 @@ def collect_messages(queue_url: str, expected: int = 21, wait_s: int = 5, timeou
         con.close()
 
 
+# function to run dbt as the quality gate
 @task
 def dbt_build() -> None:
     """Run `dbt build --project-dir dbt --profiles-dir dbt`; raise if anything fails."""
-    # TODO (Checkpoint C)
-    raise NotImplementedError
+    logger = get_run_logger()
+    # use the dbt installed next to this python so it is the venv's copy
+    dbt = shutil.which("dbt", path=os.path.dirname(sys.executable)) or "dbt"
+    # run dbt as its own process, the same command as on the command line
+    result = subprocess.run(
+        [dbt, "--no-use-colors", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"],
+        capture_output=True, text=True,
+    )
+    # pass every line of dbt's output to the prefect log so it shows in the dashboard
+    # dbt prints spacer lines that are only a timestamp so skip anything with one word or less
+    lines = [line for line in (result.stdout + result.stderr).splitlines() if len(line.split()) > 1]
+    for line in lines:
+        logger.info("dbt | %s", line)
+    # a non-zero exit code means a model or test failed
+    if result.returncode != 0:
+        # stop the flow here so a bad phrase is never submitted
+        summary = lines[-1] if lines else "no output"
+        raise RuntimeError(
+            f"dbt build failed with exit code {result.returncode} ({summary}); the phrase will not be submitted"
+        )
+    logger.info("dbt build passed")
 
 
+# function to grab the phrase that dbt assembled
 @task
 def read_phrase() -> str:
     """Read the phrase from the dbt mart model in DuckDB."""
-    # TODO (Checkpoint C)
-    raise NotImplementedError
+    logger = get_run_logger()
+    con = duckdb.connect(DUCKDB_PATH)
+    try:
+        # the mart has one row with the words already joined in order
+        row = con.execute("SELECT phrase FROM assembled_phrase").fetchone()
+    finally:
+        con.close()
+    # an empty mart means there is nothing to submit
+    if row is None or not row[0]:
+        raise ValueError("assembled_phrase is empty; nothing to submit")
+    logger.info("Assembled phrase: %s", row[0])
+    return row[0]
 
 
 @task
@@ -212,7 +246,11 @@ def dp2_pipeline():
     monitor_queue(queue_url)
     # receive, store and delete every message
     collect_messages(queue_url)
-    # TODO (Lesson 10): dbt_build -> read_phrase -> submit_solution
+    # run the dbt models and tests, this raises if any test fails
+    dbt_build()
+    # only reached when dbt passed
+    phrase = read_phrase()
+    # TODO (Checkpoint D): submit_solution(phrase)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: stg_fragments
+    description: One row per fragment, with an integer order_no, a trimmed word and duplicates removed.
+    columns:
+      - name: order_no
+        description: Position of the word in the phrase, starting at 1.
+        data_tests:
+          - not_null
+          - unique
+      - name: word
+        description: The word for this position.
+        data_tests:
+          - not_null
+      - name: received_at
+        description: When the flow stored the fragment.
+        data_tests:
+          - not_null
