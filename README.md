@@ -1,5 +1,53 @@
 # DS 3022 Data Project 2 (Fall 2026): The SQS Puzzle
 
+## My Pipeline
+
+### Polling strategy (Checkpoint A)
+
+**What I chose:** after the single POST to the scatter API, `monitor_queue` calls `get_queue_attributes` every 5 seconds and logs the three counters (visible, not visible, delayed). It waits until `ApproximateNumberOfMessagesDelayed` reaches 0, and only then lets the flow move on to collecting.
+
+**Why:**
+- The delays are random, so the delayed counter reaching 0 is the one signal that every message can now be received.
+- One small API call every 5 seconds is cheap, and the flow waits at most 5 seconds longer than it has to.
+- The timeout is 1200 seconds, above the 900-second maximum delay. A healthy run always finishes, and a broken one fails with a clear error naming how many messages are still delayed, not a hang.
+- Every poll is logged, so the Prefect dashboard shows the queue moving from delayed to visible. In fast mode (5-60 second delays) this takes about a minute.
+
+**What I rejected:**
+- **A fixed `sleep(900)`:** it always waits the worst case, even in fast mode, and it says nothing if messages go missing.
+- **Receiving in a loop without watching the counters:** an empty response looks the same whether messages are still delayed or the queue is drained, so the loop could not tell "wait longer" from "something is lost".
+- **Retrying the POST when the queue looks slow:** every POST empties the queue and sends all 21 messages again, so `populate_queue` runs once per run with no retries.
+
+### Receive, store, then delete (Checkpoint B)
+
+**How it works:** `collect_messages` asks for up to 10 messages at a time with `MessageAttributeNames=["All"]`, waiting up to 5 seconds when none are visible. An empty response has no `Messages` key, so it reads `resp.get("Messages", [])`. For each message it reads `order_no` and `word` from the attributes' `StringValue`, inserts them into `raw.fragments` in DuckDB, and only then deletes the message with its `ReceiptHandle`. It stops when 21 distinct order numbers are stored and all three queue counters are 0. If that hasn't happened after 120 seconds, it raises an error saying how many fragments arrived and how many messages are left.
+
+**Why this order:** a message is deleted only after its fragment is stored, so a failure can never lose a fragment. The worst case is storing one twice.
+
+**If the flow crashes between steps:**
+- **After receiving, before storing:** the message was never deleted, so it stays in the queue and becomes visible again after the queue's 30-second visibility timeout. Nothing is lost.
+- **After storing, before deleting:** the fragment is in DuckDB, and the message comes back after 30 seconds and can be stored a second time. That's why duplicates are expected and removed later: `collect_messages` counts distinct order numbers, and the dbt staging model keeps one row per order number.
+- **Rerunning after a crash:** every run starts with `reset_fragments`, which empties `raw.fragments`, because the POST right after it empties the queue and starts a fresh puzzle. Rows left from an older run could otherwise hide a fragment missing from this one. Emptying happens in its own task, so `collect_messages` only ever adds rows and can't lose any.
+
+**Malformed messages:** a message missing `order_no` or `word` can't be a fragment, so it's logged as a warning and deleted without being stored. It can't crash the loop or be left in the queue.
+
+**Tested:** a queue with 21 fragments, 2 duplicate copies and 2 malformed messages ended with 21 fragments stored, the duplicates counted once, both malformed messages deleted, and all counters at 0. With only 20 fragments, or an empty queue, it stopped with the timeout error instead of hanging.
+
+### dbt quality gate (Checkpoint C)
+
+**Models:**
+- **`stg_fragments`** (a view): casts `order_no` to an integer, trims `word`, drops rows that can't be a fragment (a non-numeric order number, a missing or blank word), and keeps the first-received copy of each order number, so a duplicated raw row counts once.
+- **`assembled_phrase`** (a table): one row with the words joined in `order_no` order. Sorting by the integer matters, because as strings "10" would sort before "2".
+
+**Tests:**
+- **Generic tests** in `schema.yml`: `not_null` and `unique` on `order_no`, and `not_null` on `word` and `received_at`.
+- **Singular test** `tests/assert_all_fragments_no_gaps.sql`: fails unless there are exactly 21 fragments with 21 distinct order numbers, the lowest 1 and the highest 21. 21 distinct numbers from 1 to 21 can't have a gap.
+
+**How the gate stops a bad phrase:** `dbt build` runs the tests on `stg_fragments` before it builds `assembled_phrase`. If any test fails, dbt skips the mart and exits with an error, `dbt_build` raises, and the flow stops before `read_phrase`, so nothing is submitted. dbt runs as a separate process with the command `dbt build --project-dir dbt --profiles-dir dbt`, and its output is copied into the Prefect log so it shows in the dashboard. I first ran dbt inside the flow's own process, but that replaced Prefect's log handler and dropped the task names from the logs.
+
+**Proof the tests can fail:** deleting one fragment from `raw.fragments` made `assert_all_fragments_no_gaps` fail and dbt skip `assembled_phrase`. Restoring it brought all 7 back to PASS. Duplicating a row still passed, because staging removes the duplicate.
+
+## Assignment
+
 This data project is a puzzle. Your goal is to put the pieces back together in the right order.
 
 You will write a **Prefect** data pipeline that retrieves 21 messages from an SQS queue, parses their contents, and reassembles a complete phrase from the fragments, one word per message. Your pipeline can run a single time to produce a complete result, or it can run on a schedule. Design your workflow however you see fit. You can run it as many times as you like while testing.
