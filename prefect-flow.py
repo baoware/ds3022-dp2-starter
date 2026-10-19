@@ -254,6 +254,7 @@ def submit_solution(phrase: str, platform: str = "prefect") -> int:
     return status
 
 
+# main flow: reset the table, fill the queue, collect, run dbt, then submit
 @flow(name="dp2-pipeline", log_prints=True)
 def dp2_pipeline():
     # start from an empty fragments table since the POST below starts a new puzzle
