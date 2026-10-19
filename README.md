@@ -76,6 +76,12 @@ Fragment 9 restored, so all 7 pass and `assembled_phrase` is built:
 
 Check it with `python kit/check_submission.py --verify rjr6zk prefect BA6C223CE4`, which prints `VALID receipt`.
 
+### Full-delay run (Checkpoint F)
+
+With `DP2_FAST=0`, the real 30-900 second delays, the whole flow ran end to end in 15 minutes 6 seconds. All 7 tasks completed, including `submit_solution`, and `python kit/check_submission.py` printed PASS with the same receipt code:
+
+![Prefect dashboard showing the full-delay run completed in 15m 6s with 7 task runs](docs/full-delay-run.png)
+
 ## Assignment
 
 This data project is a puzzle. Your goal is to put the pieces back together in the right order.
