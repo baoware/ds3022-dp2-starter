@@ -229,11 +229,29 @@ def read_phrase() -> str:
     return row[0]
 
 
+# function to send the phrase to the submission queue
 @task
 def submit_solution(phrase: str, platform: str = "prefect") -> int:
     """Send to dp2-submit with uvaid / phrase / platform attributes. Return the HTTP status code."""
-    # TODO (Checkpoint D)
-    raise NotImplementedError
+    logger = get_run_logger()
+    # the submission queue is separate from my own queue so look up its url
+    url = sqs.get_queue_url(QueueName="dp2-submit")["QueueUrl"]
+    # the body does not matter, the answer goes in the message attributes
+    response = sqs.send_message(
+        QueueUrl=url,
+        MessageBody="dp2 solution",
+        MessageAttributes={
+            "uvaid": {"DataType": "String", "StringValue": UVA_ID},
+            "phrase": {"DataType": "String", "StringValue": phrase},
+            "platform": {"DataType": "String", "StringValue": platform},
+        },
+    )
+    # check and log the http status of the send
+    status = response["ResponseMetadata"]["HTTPStatusCode"]
+    if status != 200:
+        raise RuntimeError(f"Submission to dp2-submit returned HTTP {status}")
+    logger.info("Submitted to dp2-submit: HTTP %d (message id %s)", status, response["MessageId"])
+    return status
 
 
 @flow(name="dp2-pipeline", log_prints=True)
@@ -250,7 +268,8 @@ def dp2_pipeline():
     dbt_build()
     # only reached when dbt passed
     phrase = read_phrase()
-    # TODO (Checkpoint D): submit_solution(phrase)
+    # send the phrase to the submission queue
+    submit_solution(phrase)
 
 
 if __name__ == "__main__":
