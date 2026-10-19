@@ -2,6 +2,12 @@
 
 ## My Pipeline
 
+### Pipeline DAG
+
+The seven Prefect tasks run top to bottom in this order. Dashed lines show what each task reads from or writes to: DuckDB and dbt on the left, the scatter API and the SQS queues on the right.
+
+![Hand-drawn DAG of the dp2-pipeline flow](docs/dag.jpg)
+
 ### Polling strategy (Checkpoint A)
 
 **What I chose:** after the single POST to the scatter API, `monitor_queue` calls `get_queue_attributes` every 5 seconds and logs the three counters (visible, not visible, delayed). It waits until `ApproximateNumberOfMessagesDelayed` reaches 0, and only then lets the flow move on to collecting.
