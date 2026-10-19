@@ -82,6 +82,33 @@ With `DP2_FAST=0`, the real 30-900 second delays, the whole flow ran end to end 
 
 ![Prefect dashboard showing the full-delay run completed in 15m 6s with 7 task runs](docs/full-delay-run.png)
 
+### Chaos round (Checkpoint F)
+
+With `DP2_CHAOS=1`, each POST sends 24 messages instead of 21: the 21 fragments, 2 duplicate copies of fragments, and 1 malformed message that has an `order_no` but no `word`. Two runs in a row, `broad-porcupine` and `impetuous-raven`, both completed, and both passed `check_submission.py` with receipt `BA6C223CE4`.
+
+**What happened to each kind of message:**
+- **Duplicates:** both copies were stored in `raw.fragments`, but `collect_messages` counts distinct order numbers, so a fragment delivered twice counted once. In the first run, a batch of 10 messages gave only 9 new fragments. The dbt staging model then kept one row per order number, and dbt reported `PASS=7`.
+- **The malformed message:** logged as a warning and deleted without being stored, so it never reached DuckDB and wasn't left in the queue.
+- **The queue:** all three counters were 0 after collecting, in both runs.
+
+Log lines from the first run:
+
+```
+Scattered 24 messages (fast (5-60s delays) + CHAOS)
+Received 10 message(s): 9/21 fragments stored, 14 left in the queue
+WARNING  Malformed message ... with attributes ['order_no'], deleting without storing
+Received 10 message(s): 17/21 fragments stored, 4 left in the queue
+Received 4 message(s): 21/21 fragments stored, 0 left in the queue
+Queue counts after collecting: visible=0 not_visible=0 delayed=0
+dbt | Done. PASS=7 WARN=0 ERROR=0 SKIP=0
+Submitted to dp2-submit: HTTP 200
+PASS  rjr6zk / prefect  receipt: BA6C223CE4
+```
+
+**What broke, and why:** nothing broke in the chaos runs themselves. Collecting was built for these cases from Checkpoint B: store before deleting, count distinct order numbers, and delete anything that isn't a fragment. I had tested that on Oct 8 with a queue of 21 fragments, 2 duplicates and 2 malformed messages.
+
+The failure I did hit today was outside chaos mode. A run started less than 60 seconds after the previous POST failed at `populate_queue` with `PurgeQueueInProgress`, because SQS allows only one purge of a queue every 60 seconds. The flow stopped with that error before sending anything. The fix was to wait a minute and run again. I left `populate_queue` without retries on purpose, because a retried POST would empty the queue and send all the messages again.
+
 ## Assignment
 
 This data project is a puzzle. Your goal is to put the pieces back together in the right order.
