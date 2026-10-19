@@ -57,6 +57,14 @@ The seven Prefect tasks run top to bottom in this order. Dashed lines show what 
 
 ![Hand-drawn DAG of the dp2-pipeline flow](docs/dag.jpg)
 
+### What each tool does
+
+| Tool | Its job in this pipeline | What I would lose without it |
+|---|---|---|
+| **Prefect** | Runs the seven tasks in order, passes the queue URL and the phrase between them, and records every run in the dashboard with each task's state and log lines. A task that raises fails the run, so the point of failure is visible. | The pipeline could still run as a plain script, but I would lose the per-task logs, the run history and the dashboard evidence, and a failure would be a bare traceback instead of a failed task in a recorded run. |
+| **DuckDB** | Stores every fragment in `raw.fragments` before its message is deleted, in one local file (`dp2.duckdb`) that both the flow and dbt use. | Fragments would exist only in Python memory between receiving and deleting, so a crash after a delete would lose them for good, and dbt would have nothing to test. |
+| **dbt** | Turns the raw rows into the answer. The staging model types and de-duplicates them, the tests check that exactly 21 contiguous fragments exist, and the mart joins the words in order. A failed test stops the flow before anything is submitted. | I would have to write every check in Python, and nothing would stop a wrong or incomplete phrase from being submitted unless I remembered all of them. The tests would also no longer show up as named PASS or FAIL lines. |
+
 ### Polling strategy (Checkpoint A)
 
 **What I chose:** after the single POST to the scatter API, `monitor_queue` calls `get_queue_attributes` every 5 seconds and logs the three counters (visible, not visible, delayed). It waits until `ApproximateNumberOfMessagesDelayed` reaches 0, and only then lets the flow move on to collecting.
