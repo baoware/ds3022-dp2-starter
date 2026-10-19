@@ -46,6 +46,22 @@
 
 **Proof the tests can fail:** deleting one fragment from `raw.fragments` made `assert_all_fragments_no_gaps` fail and dbt skip `assembled_phrase`. Restoring it brought all 7 back to PASS. Duplicating a row still passed, because staging removes the duplicate.
 
+Fragment 9 deleted, so the singular test fails and `assembled_phrase` is skipped:
+
+![dbt build failing after one fragment is deleted](docs/dbt-test-fail.png)
+
+Fragment 9 restored, so all 7 pass and `assembled_phrase` is built:
+
+![dbt build passing after the fragment is restored](docs/dbt-test-pass.png)
+
+### Submission (Checkpoint D)
+
+`submit_solution` runs only after `dbt_build` and `read_phrase` succeed. It looks up the `dp2-submit` queue and sends one message whose attributes carry `uvaid` (read from `.env`), the phrase from `assembled_phrase`, and `platform` set to `prefect`. It checks the HTTP status of the response, raises if it isn't 200, and logs the status with the message ID.
+
+**Receipt code:** `BA6C223CE4`
+
+Check it with `python kit/check_submission.py --verify rjr6zk prefect BA6C223CE4`, which prints `VALID receipt`.
+
 ## Assignment
 
 This data project is a puzzle. Your goal is to put the pieces back together in the right order.
