@@ -17,6 +17,14 @@
 - **Receiving in a loop without watching the counters:** an empty response looks the same whether messages are still delayed or the queue is drained, so the loop could not tell "wait longer" from "something is lost".
 - **Retrying the POST when the queue looks slow:** every POST empties the queue and sends all 21 messages again, so `populate_queue` runs once per run with no retries.
 
+**Evidence:** a completed run from Checkpoint A, when the flow had only `populate_queue` and `monitor_queue`:
+
+![Prefect dashboard showing a completed dp2-pipeline run](docs/checkpoint-a-dashboard.png)
+
+The same run's log, with the delayed count falling to 0, polled every 5 seconds:
+
+![Prefect log showing the queue counts until nothing is delayed](docs/checkpoint-a-logs.png)
+
 ### Receive, store, then delete (Checkpoint B)
 
 **How it works:** `collect_messages` asks for up to 10 messages at a time with `MessageAttributeNames=["All"]`, waiting up to 5 seconds when none are visible. An empty response has no `Messages` key, so it reads `resp.get("Messages", [])`. For each message it reads `order_no` and `word` from the attributes' `StringValue`, inserts them into `raw.fragments` in DuckDB, and only then deletes the message with its `ReceiptHandle`. It stops when 21 distinct order numbers are stored and all three queue counters are 0. If that hasn't happened after 120 seconds, it raises an error saying how many fragments arrived and how many messages are left.
