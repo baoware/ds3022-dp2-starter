@@ -2,6 +2,55 @@
 
 ## My Pipeline
 
+### How to set up and run it
+
+You need Python 3.12 or 3.13 and four terminals. Run every command from the repo folder with the virtual environment active. [SETUP.md](SETUP.md) has the Windows versions of these commands.
+
+**1. Set up once:**
+
+```bash
+git clone https://github.com/baoware/ds3022-dp2-starter.git
+cd ds3022-dp2-starter
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Then set `UVA_ID` in `.env` to a computing ID (mine is `rjr6zk`). Leave the other lines as they are: `DP2_FAST=1` gives the short 5-60 second delays.
+
+**2. Start the three servers, each in its own terminal** (activate the virtual environment in each one first):
+
+```bash
+moto_server -p 9324
+```
+
+```bash
+python kit/scatter_api.py
+```
+
+```bash
+prefect config set PREFECT_API_URL="http://127.0.0.1:4200/api"
+prefect server start
+```
+
+The Prefect dashboard is then at http://127.0.0.1:4200.
+
+**3. Run the pipeline and check the answer** (in the fourth terminal):
+
+```bash
+python kit/smoke_test.py
+python prefect-flow.py
+python kit/check_submission.py
+```
+
+`smoke_test.py` should end with `Emulator OK`. The flow takes about a minute in fast mode (about 15 minutes with `DP2_FAST=0`) and ends with `Finished in state Completed()`. `check_submission.py` then prints `PASS` and the receipt code.
+
+**Good to know:**
+- After changing `DP2_FAST` or `DP2_CHAOS` in `.env`, restart `python kit/scatter_api.py`. It reads `.env` only when it starts.
+- If a run fails with `PurgeQueueInProgress`, wait a minute and run it again. SQS allows only one purge of a queue every 60 seconds, and every run starts with one.
+- To run the dbt models and tests by hand, from the repo root: `dbt build --project-dir dbt --profiles-dir dbt`.
+
 ### Pipeline DAG
 
 The seven Prefect tasks run top to bottom in this order. Dashed lines show what each task reads from or writes to: DuckDB and dbt on the left, the scatter API and the SQS queues on the right.
